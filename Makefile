@@ -166,6 +166,34 @@ BOARD=HYSTM32_32
 STLIB=STM32F10X_HD
 PRECOMPILED_OBJS+=$(ROOT)/targetlibs/stm32f1/lib/startup_stm32f10x_hd.o
 OPTIMIZEFLAGS+=-O3
+
+else ifdef HYSTM32_TOM
+PROJ_NAME=espruino_hystm32_tom_vc
+#USB=1
+#USE_GRAPHICS=1
+#USE_LCD_FSMC=1
+#USE_FILESYSTEM=1
+#USE_FILESYSTEM_SDIO=1
+FAMILY=STM32F1
+CHIP=STM32F103VC
+BOARD=HYSTM32_TOM
+STLIB=STM32F10X_HD
+PRECOMPILED_OBJS+=$(ROOT)/targetlibs/stm32f1/lib/startup_stm32f10x_hd.o
+OPTIMIZEFLAGS+=-O3
+
+else ifdef HYSTM32_TOPROJ_NAME=espruino_hystm32_32_vc
+PROJ_NAME=espruino_hystm32_32_vc
+USE_GRAPHICS=1
+USE_LCD_FSMC=1
+USE_FILESYSTEM=1
+USE_FILESYSTEM_SDIO=1
+FAMILY=STM32F1
+CHIP=STM32F103VC
+BOARD=HYSTM32_32
+STLIB=STM32F10X_HD
+PRECOMPILED_OBJS+=$(ROOT)/targetlibs/stm32f1/lib/startup_stm32f10x_hd.o
+OPTIMIZEFLAGS+=-O3
+
 else ifdef STM32F4DISCOVERY
 PROJ_NAME=espruino_stm32f4discovery
 USB=1
@@ -699,7 +727,7 @@ OPTIMIZEFLAGS += -fno-common -fno-exceptions -fdata-sections -ffunction-sections
 # 4.5
 #export CCPREFIX=~/sat/bin/arm-none-eabi-
 # 4.4
-export CCPREFIX=arm-none-eabi-
+export CCPREFIX=/ISS/robot/arm-2013.05/bin/arm-none-eabi-
 endif # ARM
 
 ifdef PININFOFILE

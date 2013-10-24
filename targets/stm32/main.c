@@ -75,17 +75,18 @@ int main(void){
 //#endif
 
   bool buttonState = false;
-  buttonState = jshPinInput(BTN1_PININDEX) == BTN1_ONSTATE;
+  ///buttonState = jshPinInput(BTN1_PININDEX) == BTN1_ONSTATE;
   jsiInit(!buttonState); // pressing USER button skips autoload
 
   int counter = 0;
   while (1) {
     jsiLoop();
-
-/*#ifdef LED1_PORT
+///#ifdef LED1_PORT
     counter++;
-    GPIO_WriteBit(LED1_PORT,LED1_PIN, (counter>>13) & 1);
-#endif*/
+    ///GPIO_WriteBit(LED1_PORT,LED1_PIN, (counter>>13) & 1);
+    ///GPIO_WriteBit(GPIOB, GPIO_Pin_8, (counter>>21) & 1);
+    GPIO_WriteBit(GPIOB, GPIO_Pin_8, (counter>>13) & 1);
+///#endif
   }
   //jsiKill();
   //jshKill();
