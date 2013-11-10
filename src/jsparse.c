@@ -57,7 +57,9 @@ bool jspHasError() {
 void jspReplaceWith(JsVar *dst, JsVar *src) {
   // if we have parent info, skip it - we don't need it here
   if (jsvIsParentInfo(dst)) {
-    jspReplaceWith(jsvSkipOneName(dst), src);
+    dst = jsvSkipOneName(dst);
+    assert(!jsvIsParentInfo(dst));
+    jspReplaceWith(dst, src);
     return;
   }
   // If this is an index in an array buffer, write directly into the array buffer
@@ -376,6 +378,22 @@ bool jspParseFunction8(JspSkipFlags skipName, JsVar **a, JsVar **b, JsVar **c, J
   return true;
 }
 
+/// parse a function with any number of argument, and return an array of de-named aruments
+JsVar *jspParseFunctionAsArray() {
+  JSP_MATCH(LEX_ID);
+  JsVar *arr = jsvNewWithFlags(JSV_ARRAY);
+  if (!arr) return 0; // out of memory
+  JSP_MATCH_WITH_CLEANUP_AND_RETURN('(', jsvUnLock(arr), 0);
+  while (!JSP_HAS_ERROR && execInfo.lex->tk!=')' && execInfo.lex->tk!=LEX_EOF) {
+    JsVar *arg = jsvSkipNameAndUnLock(jspeBase());
+    jsvArrayPush(arr, arg); // even if undefined
+    jsvUnLock(arg);
+    if (execInfo.lex->tk!=')') JSP_MATCH_WITH_CLEANUP_AND_RETURN(',', jsvUnLock(arr), 0);
+  }
+  JSP_MATCH_WITH_CLEANUP_AND_RETURN(')', jsvUnLock(arr), 0);
+  return arr;
+}
+
 // ----------------------------------------------
 
 // we return a value so that JSP_MATCH can return 0 if it fails (if we pass 0, we just parse all args)
@@ -581,8 +599,6 @@ JsVar *jspeFunctionCall(JsVar *function, JsVar *functionName, JsVar *thisArg, bo
       }
     }
 
-
-
     if (isParsing) JSP_MATCH('(');
     // create a new symbol table entry for execution of this function
     // OPT: can we cache this function execution environment + param variables?
@@ -597,11 +613,14 @@ JsVar *jspeFunctionCall(JsVar *function, JsVar *functionName, JsVar *thisArg, bo
         thisVar = jsvAddNamedChild(functionRoot, thisArg, JSPARSE_THIS_VAR);
     if (isParsing) {
       int hadParams = 0;
-      // grab in all parameters
+      // grab in all parameters. We go around this loop until we've run out
+      // of named parameters AND we've parsed all the supplied arguments
       v = function->firstChild;
-      while (!JSP_HAS_ERROR && v) {
-        JsVar *param = jsvLock(v);
-        if (jsvIsFunctionParameter(param)) {
+      while (!JSP_HAS_ERROR && (v || execInfo.lex->tk!=')')) {
+        JsVar *param = 0;
+        if (v) param = jsvLock(v);
+        bool paramDefined = jsvIsFunctionParameter(param);
+        if (execInfo.lex->tk!=')' || paramDefined) {
           hadParams++;
           JsVar *value = 0;
           // ONLY parse this if it was supplied, otherwise leave 0 (undefined)
@@ -610,7 +629,9 @@ JsVar *jspeFunctionCall(JsVar *function, JsVar *functionName, JsVar *thisArg, bo
           // and if execute, copy it over
           if (JSP_SHOULD_EXECUTE) {
             value = jsvSkipNameButNotParentAndUnLock(value);
-            JsVar *newValueName = jsvMakeIntoVariableName(jsvCopy(param), value);
+            JsVar *paramName = paramDefined ? jsvCopy(param) : jsvNewFromEmptyString();
+            paramName->flags |= JSV_FUNCTION_PARAMETER; // force this to be called a function parameter
+            JsVar *newValueName = jsvMakeIntoVariableName(paramName, value);
             if (newValueName) { // could be out of memory
               jsvAddName(functionRoot, newValueName);
             } else
@@ -620,30 +641,29 @@ JsVar *jspeFunctionCall(JsVar *function, JsVar *functionName, JsVar *thisArg, bo
           jsvUnLock(value);
           if (execInfo.lex->tk!=')') JSP_MATCH(',');
         }
-        v = param->nextSibling;
-        jsvUnLock(param);
-      }
-      // throw away extra params
-      while (execInfo.lex->tk != ')') {
-        if (hadParams>0) JSP_MATCH(',');
-        jsvUnLock(jspeBase());
+        if (param) {
+          v = param->nextSibling;
+          jsvUnLock(param);
+        }
       }
       JSP_MATCH(')');
     } else if (JSP_SHOULD_EXECUTE && argCount>0) {  // and NOT isParsing
       int args = 0;
       v = function->firstChild;
-      while (args<argCount && v) {
-        JsVar *param = jsvLock(v);
-        if (jsvIsFunctionParameter(param)) {
-          JsVar *newValueName = 0;
-          newValueName = jsvMakeIntoVariableName(jsvCopy(param), argPtr[args]);
-          if (newValueName) // could be out of memory - or maybe just not supplied!
-            jsvAddName(functionRoot, newValueName);
-          jsvUnLock(newValueName);
-          args++;
+      while (args<argCount) {
+        JsVar *param = v ? jsvLock(v) : 0;
+        bool paramDefined = jsvIsFunctionParameter(param);
+        JsVar *paramName = paramDefined ? jsvCopy(param) : jsvNewFromEmptyString();
+        paramName->flags |= JSV_FUNCTION_PARAMETER; // force this to be called a function parameter
+        JsVar *newValueName = jsvMakeIntoVariableName(paramName, argPtr[args]);
+        if (newValueName) // could be out of memory - or maybe just not supplied!
+          jsvAddName(functionRoot, newValueName);
+        jsvUnLock(newValueName);
+        args++;
+        if (param) {
+          v = param->nextSibling;
+          jsvUnLock(param);
         }
-        v = param->nextSibling;
-        jsvUnLock(param);
       }
     } 
     // setup a return variable
@@ -933,23 +953,56 @@ JsVar *jspeFactorMember(JsVar *a) {
 JsVar *jspeFactor();
 void jspEnsureIsPrototype(JsVar *prototypeName);
 
-JsVar *jspeFactorNew() {
-  if (execInfo.lex->tk==LEX_R_NEW) {
-    JSP_MATCH(LEX_R_NEW);
-    execInfo.execute |= EXEC_CONSTRUCT;
+JsVar *jspeConstruct(JsVar *func, JsVar *funcName, bool hasArgs) {
+  assert(JSP_SHOULD_EXECUTE);
+  if (!jsvIsFunction(func)) {
+    jsErrorAt("Constructor should be a function", execInfo.lex, execInfo.lex->tokenLastEnd);
+    jspSetError();
+    return 0;
   }
-  return jspeFactorMember(jspeFactor());
+
+  JsVar *thisObj = jsvNewWithFlags(JSV_OBJECT);
+  // Make sure the function has a 'prototype' var
+  JsVar *prototypeName = jsvFindChildFromString(func, JSPARSE_PROTOTYPE_VAR, true);
+  jspEnsureIsPrototype(prototypeName); // make sure it's an object
+  jsvUnLock(jsvAddNamedChild(thisObj, prototypeName, JSPARSE_INHERITS_VAR));
+  jsvUnLock(prototypeName);
+
+  JsVar *a = jspeFunctionCall(func, funcName, thisObj, hasArgs, 0, 0);
+
+  if (a) {
+    jsvUnLock(thisObj);
+    thisObj = a;
+  } else {
+    jsvUnLock(a);
+    JsVar *constructor = jsvFindChildFromString(thisObj, JSPARSE_CONSTRUCTOR_VAR, true);
+    if (constructor) {
+      jsvSetValueOfName(constructor, funcName);
+      jsvUnLock(constructor);
+    }
+  }
+  return thisObj;
 }
 
 JsVar *jspeFactorFunctionCall() {
   /* The parent if we're executing a method call */
-  JsVar *parent = 0, *a;
+  JsVar *parent = 0;
 
-  a = jspeFactorNew();
-  bool isConstruct = (execInfo.execute & EXEC_CONSTRUCT) ? true : false;
-  execInfo.execute &= (JsExecFlags)~EXEC_CONSTRUCT;
+  bool isConstructor = false;
+  if (execInfo.lex->tk==LEX_R_NEW) {
+    JSP_MATCH(LEX_R_NEW);
+    isConstructor = true;
 
-  while (execInfo.lex->tk=='(') {
+    if (execInfo.lex->tk==LEX_R_NEW) {
+      jsError("Nesting 'new' operators is unsupported");
+      jspSetError();
+      return 0;
+    }
+  }
+
+  JsVar *a = jspeFactorMember(jspeFactor());
+
+  while (execInfo.lex->tk=='(' || (isConstructor && JSP_SHOULD_EXECUTE)) {
     JsVar *funcName = a;
     JsVarRef parentRef = 0;
     JsVar *func = jsvSkipNameKeepParent(funcName, &parentRef);
@@ -958,35 +1011,16 @@ JsVar *jspeFactorFunctionCall() {
       parent = jsvLock(parentRef);
     }
 
-    JsVar *thisObj = parent;
+    /* The constructor function doesn't change parsing, so if we're
+     * not executing, just short-cut it. */
+    if (isConstructor && JSP_SHOULD_EXECUTE) {
+      // If we have '(' parse an argument list, otherwise don't look for any args
+      bool parseArgs = execInfo.lex->tk=='(';
+      a = jspeConstruct(func, funcName, parseArgs);
+      isConstructor = false; // don't treat subsequent brackets as constructors
+    } else
+      a = jspeFunctionCall(func, funcName, parent, true, 0, 0);
 
-    if (isConstruct) {
-      thisObj = jsvNewWithFlags(JSV_OBJECT);
-      // Make sure the function has a 'prototype' var
-      JsVar *prototypeName = jsvFindChildFromString(func, JSPARSE_PROTOTYPE_VAR, true);
-      jspEnsureIsPrototype(prototypeName); // make sure it's an object
-      // TODO: if prototypeName is not an object, set the [[Prototype]] property of Result(1) to the original Object prototype object as described in 15.2.3.1.
-      jsvUnLock(jsvAddNamedChild(thisObj, prototypeName, JSPARSE_INHERITS_VAR));
-      jsvUnLock(prototypeName);
-    }
-
-    a = jspeFunctionCall(func, funcName, thisObj, true, 0, 0);
-
-    if (isConstruct) {
-      if (a) {
-        jsvUnLock(thisObj);
-        thisObj = a;
-      } else {
-        jsvUnLock(a);
-        JsVar *constructor = jsvFindChildFromString(thisObj, JSPARSE_CONSTRUCTOR_VAR, true);
-        if (constructor) {
-          jsvSetValueOfName(constructor, funcName);
-          jsvUnLock(constructor);
-        }
-        a = thisObj;
-      }
-      isConstruct = 0;
-    }
     jsvUnLock(funcName);
     jsvUnLock(func);
     a = jspeFactorMember(a);
@@ -1097,67 +1131,6 @@ void jspEnsureIsPrototype(JsVar *prototypeName) {
   jsvUnLock(prototypeVar);
 }
 
-JsVar *jspeFactorNewArray() {
-  JSP_MATCH(LEX_ID);
-  JsVar *arr = jsvNewWithFlags(JSV_ARRAY);
-  if (!arr) return 0; // out of memory
-  if (execInfo.lex->tk == '(') {
-    JsVar *arg = 0;
-    bool moreThanOne = false;
-    JSP_MATCH('(');
-    while (execInfo.lex->tk!=')' && execInfo.lex->tk!=LEX_EOF) {
-      if (arg) {
-        moreThanOne = true;
-        jsvArrayPush(arr, arg);
-        jsvUnLock(arg);
-      }
-      arg = jsvSkipNameAndUnLock(jspeBase());
-      if (execInfo.lex->tk!=')') JSP_MATCH(',');
-    }
-    JSP_MATCH(')');
-    if (arg) {
-      if (!moreThanOne && jsvIsInt(arg) && jsvGetInteger(arg)>=0) { // this is the size of the array
-        JsVarInt count = jsvGetIntegerAndUnLock(arg);
-        // we cheat - no need to fill the array - just the last element
-        if (count>0) {
-          JsVar *idx = jsvMakeIntoVariableName(jsvNewFromInteger(count-1), 0);
-          if (idx) { // could be out of memory
-            jsvAddName(arr, idx);
-            jsvUnLock(idx);
-          }
-        }
-      } else { // just append to array
-        jsvArrayPush(arr, arg);
-        jsvUnLock(arg);
-      }
-    }
-  }
-  return arr;
-}
-
-JsVar *jspeFactorNewString() {
-  JsVar *a = jspParseSingleFunction();
-  if (!a) return jsvNewFromEmptyString(); // out of mem, or just no argument!
-  return jsvAsString(a, true);
-}
-
-JsVar *jspeFactorNewId() {
-  // TODO: these should be regular constructors
-  if (JSP_SHOULD_EXECUTE) {
-    const char *name = jslGetTokenValueAsString(execInfo.lex);
-    if (strcmp(name, "Array")==0)
-      return jspeFactorNewArray();
-    else if (strcmp(name, "String")==0)
-      return jspeFactorNewString();
-    return 0;
-  }
-  else {
-    JSP_MATCH(LEX_ID);
-    jspeParseFunctionCallBrackets();
-    return 0;
-  }
-}
-
 JsVar *jspeFactorTypeOf() {
   JSP_MATCH(LEX_R_TYPEOF);
   JsVar *a = jspeBase();
@@ -1197,11 +1170,6 @@ JsVar *jspeFactor() {
         JSP_MATCH(LEX_R_UNDEFINED);
         return 0;
     } else if (execInfo.lex->tk==LEX_ID) {
-      if (execInfo.execute & EXEC_CONSTRUCT) {
-        JsVar *a = jspeFactorNewId();
-        if (a || !JSP_SHOULD_EXECUTE)
-          return a;
-      }
       return jspeFactorId();
     } else if (execInfo.lex->tk==LEX_INT) {
         // atol works only on decimals
@@ -1286,10 +1254,10 @@ JsVar *jspeUnary() {
         return jsvNewFromBool(!jsvGetBoolAndUnLock(jsvSkipNameAndUnLock(jspeUnary())));
       } else if (execInfo.lex->tk=='~') {
         JSP_MATCH('~'); // bitwise not
-        return jsvNewFromInteger(~jsvGetIntegerAndUnLock(jspeUnary()));
+        return jsvNewFromInteger(~jsvGetIntegerAndUnLock(jsvSkipNameAndUnLock(jspeUnary())));
       } else if (execInfo.lex->tk=='-') {
         JSP_MATCH('-'); // binary not
-        return jsvNegateAndUnLock(jspeUnary());
+        return jsvNegateAndUnLock(jspeUnary()); // names already skipped
       }
       assert(0);
       return 0;
@@ -1505,6 +1473,7 @@ __attribute((noinline)) JsVar *__jspeBase(JsVar *lhs) {
         // if we have parent info, skip it - we don't need it here
         if (jsvIsParentInfo(lhs))
           lhs = jsvSkipOneNameAndUnLock(lhs);
+        assert(!jsvIsParentInfo(lhs));
 
         JsVar *rhs;
         /* If we're assigning to this and we don't have a parent,
@@ -1693,7 +1662,7 @@ JsVar *jspeStatementSwitch() {
     jsvUnLock(test);
     if (cond && (execInfo.execute&EXEC_RUN_MASK)==EXEC_NO)
       execInfo.execute=EXEC_YES|EXEC_IN_SWITCH;
-    while (execInfo.lex->tk!=LEX_EOF && execInfo.lex->tk!=LEX_R_CASE && execInfo.lex->tk!=LEX_R_DEFAULT && execInfo.lex->tk!='}')
+    while (!JSP_HAS_ERROR && execInfo.lex->tk!=LEX_EOF && execInfo.lex->tk!=LEX_R_CASE && execInfo.lex->tk!=LEX_R_DEFAULT && execInfo.lex->tk!='}')
       jsvUnLock(jspeBlockOrStatement());
   }
   jsvUnLock(switchOn);
@@ -1706,7 +1675,7 @@ JsVar *jspeStatementSwitch() {
     JSP_MATCH(':');
     JSP_SAVE_EXECUTE();
     if (hasExecuted) jspSetNoExecute();
-    while (execInfo.lex->tk!=LEX_EOF && execInfo.lex->tk!='}')
+    while (!JSP_HAS_ERROR && execInfo.lex->tk!=LEX_EOF && execInfo.lex->tk!='}')
       jsvUnLock(jspeBlockOrStatement());
     JSP_RESTORE_EXECUTE();
   }
@@ -1812,14 +1781,16 @@ JsVar *jspeStatementFor() {
     JSP_RESTORE_EXECUTE();
 
     if (jsvIsIterable(array)) {
-      bool isFunction = jsvIsFunction(array);
+      bool (*checkerFunction)(JsVar*) = 0;
+      if (jsvIsFunction(array)) checkerFunction = jsvIsInternalFunctionKey;
+      else if (jsvIsObject(array)) checkerFunction = jsvIsInternalObjectKey;
       JsvIterator it;
       jsvIteratorNew(&it, array);
       bool hasHadBreak = false;
       while (JSP_SHOULD_EXECUTE && jsvIteratorHasElement(&it) && !hasHadBreak) {
           JsVar *loopIndexVar = jsvIteratorGetKey(&it);
           bool ignore = false;
-          if (isFunction && jsvIsInternalFunctionKey(loopIndexVar))
+          if (checkerFunction && checkerFunction(loopIndexVar))
             ignore = true;
           if (!ignore) {
             JsVar *indexValue = jsvIsName(loopIndexVar) ?

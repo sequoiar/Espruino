@@ -60,10 +60,11 @@ Please note that this is BETA. We've been working hard on the Espruino Board sup
 * HY STM32 3.2" - WORKING
 * Olimexino - WORKING
 * Carambola - ?
-* Raspberry Pi - ?
+* Raspberry Pi - WORKING
 * Sony SmartWatch - USB VCP support still needed
 * MBed platforms - have not worked for a while - hardware wrapper still needed
 * Arduino - has never worked. Compiles but doesn't even seem to get past init
+* LC-TECH STM32F103RBT6 - WORKING, but with some issues (LED inverted logic, BTN needs pullup to work)
 
 Using
 -----

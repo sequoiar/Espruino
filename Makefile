@@ -12,7 +12,8 @@
 # Set ONE of the following environment variables to compile for that board:
 #
 # ESPRUINO_1V0=1          # Espruino board rev 1.0
-# ESPRUINO_1V1=1          # Espruino board rev 1.1
+# ESPRUINO_1V1=1          # Espruino board rev 1.1 and 1.2
+# ESPRUINO_1V3=1          # Espruino board rev 1.3
 # OLIMEX=1                # Olimexino STM32
 # OLIMEX_BOOTLOADER=1     # Olimexino STM32 with bootloader
 # HYSTM32_24=1            # HY STM32 2.4 Ebay boards
@@ -24,6 +25,7 @@
 # CARAMBOLA=1
 # RASPBERRYPI=1
 # LPC1768=1 # beta
+# LCTECH_STM32F103RBT6=1 # LC Technology STM32F103RBT6 Ebay boards
 # Or nothing for standard linux compile
 #
 # Also:
@@ -69,6 +71,7 @@ CWD = $(shell pwd)
 ROOT = $(CWD)
 PRECOMPILED_OBJS=
 PLATFORM_CONFIG_FILE=gen/platform_config.h
+BASEADDRESS=0x08000000
 
 ###################################################
 # When adding stuff here, also remember build_pininfo, platform_config.h, jshardware.c
@@ -94,12 +97,27 @@ DEFINES+=-DESPRUINO_1V1
 USE_BOOTLOADER=1
 BOOTLOADER_PROJ_NAME=bootloader_espruino_1v1
 USB=1
+USE_GRAPHICS=1
+USE_FILESYSTEM=1
+FAMILY=STM32F1
+CHIP=STM32F103RC
+BOARD=ESPRUINOBOARD_R1_1
+DEFINES+=-DESPRUINOBOARD
+STLIB=STM32F10X_XL
+PRECOMPILED_OBJS+=$(ROOT)/targetlibs/stm32f1/lib/startup_stm32f10x_hd.o
+OPTIMIZEFLAGS+=-O3
+else ifdef ESPRUINO_1V3
+PROJ_NAME=espruino_espruino_1v3
+DEFINES+=-DESPRUINO_1V3
+USE_BOOTLOADER=1
+BOOTLOADER_PROJ_NAME=bootloader_espruino_1v3
+USB=1
 #USE_NET=1
 #USE_CC3000=1
 USE_GRAPHICS=1
 USE_FILESYSTEM=1
 FAMILY=STM32F1
-CHIP=STM32F103RC
+CHIP=STM32F103RD
 BOARD=ESPRUINOBOARD
 STLIB=STM32F10X_XL
 PRECOMPILED_OBJS+=$(ROOT)/targetlibs/stm32f1/lib/startup_stm32f10x_hd.o
@@ -219,6 +237,8 @@ PRECOMPILED_OBJS+=$(ROOT)/targetlibs/stm32f2/lib/startup_stm32f2xx.o
 OPTIMIZEFLAGS+=-O3
 else ifdef STM32F3DISCOVERY
 PROJ_NAME=espruino_stm32f3discovery
+#USE_BOOTLOADER=1
+#BOOTLOADER_PROJ_NAME=bootloader_espruino_stm32f3discovery
 USB=1
 FAMILY=STM32F3
 CHIP=STM32F303
@@ -270,6 +290,16 @@ USB=1
 USE_GRAPHICS=1
 #USE_LCD_SDL=1
 USE_NET=1
+else ifdef LCTECH_STM32F103RBT6
+PROJ_NAME=espruino_lctechstm32f103rbt6
+USB=1
+SAVE_ON_FLASH=1
+FAMILY=STM32F1
+CHIP=STM32F103RB
+BOARD=LCTECH_STM32F103RBT6
+STLIB=STM32F10X_MD
+PRECOMPILED_OBJS+=$(ROOT)/targetlibs/stm32f1/lib/startup_stm32f10x_md.o
+OPTIMIZEFLAGS+=-Os
 else
 PROJ_NAME=espruino
 BOARD=LINUX
@@ -324,11 +354,14 @@ WRAPPERSOURCES =
 SOURCES = \
 targets/stm32_boot/main.c \
 targets/stm32_boot/utils.c
-OPTIMIZEFLAGS=-Os
+ ifndef DEBUG
+  OPTIMIZEFLAGS=-Os
+ endif
 else # !BOOTLOADER
  ifdef USE_BOOTLOADER
   BUILD_LINKER_FLAGS+=--using_bootloader
-  STM32LOADER_FLAGS+=-p /dev/ttyACM0 -a 0x08002800
+  STM32LOADER_FLAGS+=-p /dev/ttyACM0
+  BASEADDRESS=$(shell python -c "import sys;sys.path.append('scripts');import common;print hex(0x08000000+common.get_bootloader_size())")
  endif
 endif
 
@@ -895,14 +928,14 @@ ifdef MBED
 	cp $(PROJ_NAME).bin /media/MBED;sync
 else
 	echo ST-LINK flash
-	~/bin/st-flash write $(PROJ_NAME).bin 0x08000000
+	~/bin/st-flash write $(PROJ_NAME).bin $(BASEADDRESS)
 endif	
 endif	
 
 serialflash: all
 	echo STM32 inbuilt serial bootloader, set BOOT0=1, BOOT1=0
-	python scripts/stm32loader.py -ew $(STM32LOADER_FLAGS) $(PROJ_NAME).bin
-#	python scripts/stm32loader.py -ewv $(PROJ_NAME).bin
+	python scripts/stm32loader.py -b 460800 -a $(BASEADDRESS) -ew $(STM32LOADER_FLAGS) $(PROJ_NAME).bin
+#	python scripts/stm32loader.py -b 460800 -a $(BASEADDRESS) -ewv $(STM32LOADER_FLAGS) $(PROJ_NAME).bin
 		
 gdb: 
 	echo "target extended-remote :4242" > gdbinit

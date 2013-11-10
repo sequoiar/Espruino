@@ -18,6 +18,14 @@
 #include "jsinteractive.h"
 #include "jswrapper.h"
 
+#ifdef ARM
+#include "mconf.h"
+#include "protos.h"
+#else
+#include <math.h>
+#endif
+
+
 /** Basically, JsVars are stored in one big array, so save the need for
  * lots of memory allocation. On Linux, the arrays are in blocks, so that
  * more blocks can be allocated. We can't use realloc on one big block as
@@ -715,9 +723,13 @@ JsVar *jsvAsString(JsVar *v, bool unlockVar) {
       itoa(v->varData.integer, buf, 10);
       str = jsvNewFromString(buf);
     } else if (jsvIsFloat(v)) {
-      char buf[JS_NUMBER_BUFFER_SIZE];
-      ftoa(v->varData.floating, buf);
-      str = jsvNewFromString(buf);
+      if (isnan(v->varData.floating)) {
+        str = jsvNewFromString("NaN");
+      } else {
+        char buf[JS_NUMBER_BUFFER_SIZE];
+        ftoa(v->varData.floating, buf);
+        str = jsvNewFromString(buf);
+      }
     } else if (jsvIsArray(v) || jsvIsArrayBuffer(v)) {
       JsVar *filler = jsvNewFromString(",");
       str = jsvArrayJoin(v, filler);
@@ -1952,21 +1964,60 @@ void jsvTraceLockInfo(JsVar *v) {
     jsiConsolePrint("] ");
 }
 
-/** Write debug info for this Var out to the console */
-void jsvTrace(JsVarRef ref, int indent) {
+/** Get the lowest level at which searchRef appears */
+int _jsvTraceGetLowestLevel(JsVarRef ref, JsVarRef searchRef) {
+  if (ref == searchRef) return 0;
+  int found = -1;
+  JsVar *var = jsvLock(ref);
+
+  // Use IS_RECURSING  flag to stop recursion
+  if (var->flags & JSV_IS_RECURSING) {
+    jsvUnLock(var);
+    return -1;
+  }
+  var->flags |= JSV_IS_RECURSING; 
+
+  if (jsvHasSingleChild(var) && var->firstChild) {
+    int f = _jsvTraceGetLowestLevel(var->firstChild, searchRef);
+    if (f>=0 && (found<0 || f<found)) found=f+1;
+  }
+  if (jsvHasChildren(var)) {
+    JsVarRef childRef = var->firstChild;
+    while (childRef) {       
+      int f = _jsvTraceGetLowestLevel(childRef, searchRef);
+      if (f>=0 && (found<0 || f<found)) found=f+1;
+
+      JsVar *child = jsvLock(childRef);
+      childRef = child->nextSibling;
+      jsvUnLock(child);
+    }
+  }
+
+  var->flags &= ~JSV_IS_RECURSING;
+  jsvUnLock(var);
+
+  return found; // searchRef not found
+}
+
+void _jsvTrace(JsVarRef ref, int indent, JsVarRef baseRef, int level) {
 #ifdef SAVE_ON_FLASH
   jsiConsolePrint("Trace unimplemented in this version.\n");
 #else
     int i;
-    JsVar *var;
-
     for (i=0;i<indent;i++) jsiConsolePrint(" ");
 
     if (!ref) {
         jsiConsolePrint("undefined\n");
         return;
     }
-    var = jsvLock(ref);
+    /*jsiConsolePrint("<");
+    jsiConsolePrintInt(level);
+    jsiConsolePrint(":");
+    jsiConsolePrintInt(_jsvTraceGetLowestLevel(baseRef, ref));
+    jsiConsolePrint("> ");*/
+    
+
+    JsVar *var = jsvLock(ref);
     jsvTraceLockInfo(var);
 
 
@@ -1998,17 +2049,34 @@ void jsvTrace(JsVarRef ref, int indent) {
       ref = var->firstChild;
       jsvUnLock(var);
       if (ref) {
+        level++;
+        int lowestLevel = _jsvTraceGetLowestLevel(baseRef, ref);
+        /*jsiConsolePrint("<");
+        jsiConsolePrintInt(level);
+        jsiConsolePrint(":");
+        jsiConsolePrintInt(lowestLevel);
+        jsiConsolePrint("> ");*/
+
         var = jsvLock(ref);
         jsvTraceLockInfo(var);
+        if (lowestLevel < level) {
+          // If this data is available elsewhere in the tree (but nearer the root)
+          // then don't print it. This makes the dump significantly more readable!
+          // It also stops us getting in recursive loops ...
+          jsiConsolePrint("...\n");
+          jsvUnLock(var);
+          return;
+        }
+
       } else {
-          jsiConsolePrint("undefined\n");
+        jsiConsolePrint("undefined\n");
         return;
       }
     }
 
     if (jsvIsName(var)) {
       jsiConsolePrint("\n");
-      jsvTrace(jsvGetRef(var), indent+2);
+      _jsvTrace(jsvGetRef(var), indent+2, baseRef, level+1);
       jsvUnLock(var);
       return;
     }
@@ -2018,12 +2086,12 @@ void jsvTrace(JsVarRef ref, int indent) {
       jsvTraceLockInfo(parent);
       jsvUnLock(parent);
       jsiConsolePrint(")\n");
-      jsvTrace(var->firstChild, indent+2);
+      _jsvTrace(var->firstChild, indent+2, baseRef, level+1);
       jsvUnLock(var);
       return;
     }
-    if (jsvIsObject(var)) jsiConsolePrint("Object {\n");
-    else if (jsvIsArray(var)) jsiConsolePrint("Array [\n");
+    if (jsvIsObject(var)) jsiConsolePrint("Object {");
+    else if (jsvIsArray(var)) jsiConsolePrint("Array [");
     else if (jsvIsPin(var)) jsiConsolePrint("Pin ");
     else if (jsvIsInt(var)) jsiConsolePrint("Integer ");
     else if (jsvIsFloat(var)) jsiConsolePrint("Double ");
@@ -2031,10 +2099,10 @@ void jsvTrace(JsVarRef ref, int indent) {
     else if (jsvIsArrayBuffer(var)) {
       jsiConsolePrint(jswGetBasicObjectName(var)); // way to get nice name
       jsiConsolePrint(" ");
-      jsvTrace(var->firstChild, indent+1);
+      _jsvTrace(var->firstChild, indent+1, baseRef, level+1);
       jsvUnLock(var);
       return;
-    } else if (jsvIsFunction(var)) jsiConsolePrint("Function {\n");
+    } else if (jsvIsFunction(var)) jsiConsolePrint("Function {");
     else {
         jsiConsolePrint("Flags ");
         jsiConsolePrintInt(var->flags & (JsVarFlags)~(JSV_LOCK_MASK));
@@ -2044,7 +2112,14 @@ void jsvTrace(JsVarRef ref, int indent) {
     if (!jsvIsObject(var) && !jsvIsArray(var) && !jsvIsFunction(var)) {
       JsVar *str = jsvAsString(var, false);
       if (str) {
-        jsiConsolePrintStringVar(str);
+        JsvStringIterator it;
+        jsvStringIteratorNew(&it, str, 0);
+        while (jsvStringIteratorHasChar(&it)) {
+          char ch = jsvStringIteratorGetChar(&it);
+          jsiConsolePrint(escapeCharacter(ch));
+          jsvStringIteratorNext(&it);
+        }
+        jsvStringIteratorFree(&it);
         jsvUnLock(str);
       }
     }
@@ -2062,37 +2137,32 @@ void jsvTrace(JsVarRef ref, int indent) {
         jsiConsolePrint(")\n");
       } else
           jsiConsolePrint("\n");
-    } else if (!(var->flags & JSV_IS_RECURSING)) {
-      /* IS_RECURSING check stops infinite loops */
-      var->flags |= JSV_IS_RECURSING;
+    } else {
       JsVarRef child = var->firstChild;
       jsiConsolePrint("\n");
       // dump children
       while (child) {
         JsVar *childVar;
-        jsvTrace(child, indent+2);
+        _jsvTrace(child, indent+2, baseRef, level+1);
         childVar = jsvLock(child);
         child = childVar->nextSibling;
         jsvUnLock(childVar);
       }
-      var->flags &= (JsVarFlags)~JSV_IS_RECURSING;
-    } else {
-        jsiConsolePrint(" ... ");
     }
 
-
-    if (jsvIsObject(var) || jsvIsFunction(var)) {
+    if (jsvIsObject(var) || jsvIsFunction(var) || jsvIsArray(var)) {
       int i;
       for (i=0;i<indent;i++) jsiConsolePrint(" ");
-      jsiConsolePrint("}\n");
-    } else if (jsvIsArray(var)) {
-      int i;
-      for (i=0;i<indent;i++) jsiConsolePrint(" ");
-      jsiConsolePrint("]\n");
+      jsiConsolePrint(jsvIsArray(var) ? "]\n" : "}\n");
     }
 
     jsvUnLock(var);
 #endif
+}
+
+/** Write debug info for this Var out to the console */
+void jsvTrace(JsVarRef ref, int indent) {
+  _jsvTrace(ref,indent,ref,0);
 }
 
 
@@ -2194,7 +2264,14 @@ void jsvDottyOutput() {
       if (!jsvIsStringExt(var) && !jsvIsObject(var) && !jsvIsArray(var)) {
         jsiConsolePrint(":");
         jsvGetString(var,buf,256);
-        jsiConsolePrintEscaped(buf);
+        JsvStringIterator it;
+        jsvStringIteratorNew(&it, var, 0);
+        while (jsvStringIteratorHasChar(&it)) {
+          char ch = jsvStringIteratorGetChar(&it);
+          jsiConsolePrint(escapeCharacter(ch));
+          jsvStringIteratorNext(&it);
+        }
+        jsvStringIteratorFree(&it);
       }
       jsiConsolePrint("\"];\n");
 
@@ -2280,10 +2357,20 @@ JsVar *jsvStringTrimRight(JsVar *srcString) {
 
 /// If v is the key of a function, return true if it is internal and shouldn't be visible to the user
 bool jsvIsInternalFunctionKey(JsVar *v) {
-  return (jsvIsString(v) && v->varData.str[0]==JS_HIDDEN_CHAR) ||
+  return (jsvIsString(v) && (
+              v->varData.str[0]==JS_HIDDEN_CHAR)
+                            ) ||
          jsvIsFunctionParameter(v);
 }
 
+/// If v is the key of an object, return true if it is internal and shouldn't be visible to the user
+bool jsvIsInternalObjectKey(JsVar *v) {
+  return (jsvIsString(v) && (
+              v->varData.str[0]==JS_HIDDEN_CHAR ||
+              jsvIsStringEqual(v, JSPARSE_INHERITS_VAR) ||
+              jsvIsStringEqual(v, JSPARSE_CONSTRUCTOR_VAR)
+                            ));
+}
 
 // --------------------------------------------------------------------------------------------
 
